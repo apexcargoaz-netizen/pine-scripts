@@ -1,0 +1,293 @@
+//@version=5
+indicator("Reversal Sniper", shorttitle="REV SNIPER", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// INPUTS — All adjustable, all simple
+// ============================================================================
+grp_pivot = "── PIVOT SETTINGS ──"
+pivot_len     = input.int(6,    "Swing Pivot Lookback",     group=grp_pivot, minval=3, maxval=20)
+pivot_len2    = input.int(10,   "Higher Timeframe Pivot",   group=grp_pivot, minval=5, maxval=30)
+
+grp_rsi = "── RSI ──"
+rsi_len       = input.int(14,   "RSI Length",               group=grp_rsi)
+rsi_buy_max   = input.int(45,   "RSI Max for BUY",          group=grp_rsi, tooltip="RSI must be below this at swing low")
+rsi_sell_min  = input.int(55,   "RSI Min for SELL",         group=grp_rsi, tooltip="RSI must be above this at swing high")
+
+grp_stoch = "── STOCH RSI ──"
+use_stoch     = input.bool(true, "Use Stoch RSI Confirmation", group=grp_stoch)
+stoch_len     = input.int(14,   "Stoch Length",             group=grp_stoch)
+stoch_k       = input.int(3,    "K Smoothing",              group=grp_stoch)
+stoch_d       = input.int(3,    "D Smoothing",              group=grp_stoch)
+stoch_ob      = input.int(80,   "Overbought",               group=grp_stoch)
+stoch_os      = input.int(20,   "Oversold",                 group=grp_stoch)
+
+grp_vol = "── VOLUME ──"
+use_vol       = input.bool(true, "Require Volume Confirmation", group=grp_vol)
+vol_len       = input.int(20,   "Volume MA Length",         group=grp_vol)
+vol_min_mult  = input.float(0.7, "Min Volume Multiplier",   group=grp_vol, step=0.1, tooltip="Volume must be above this x average")
+
+grp_div = "── DIVERGENCE ──"
+use_div       = input.bool(true, "Use Divergence as Extra Confirmation", group=grp_div)
+div_lb        = input.int(10,   "Divergence Lookback",      group=grp_div, minval=5, maxval=30)
+
+grp_atr = "── ATR / TARGETS ──"
+atr_len       = input.int(14,   "ATR Length",               group=grp_atr)
+stop_mult     = input.float(1.5, "Stop Loss ATR Multiplier", group=grp_atr, step=0.1)
+tp1_mult      = input.float(2.5, "TP1 R Multiple",          group=grp_atr, step=0.5)
+tp2_mult      = input.float(4.0, "TP2 R Multiple",          group=grp_atr, step=0.5)
+lbl_offset    = input.float(2.0, "Label Offset ATR Mult",   group=grp_atr, step=0.5)
+
+grp_filter = "── FILTERS ──"
+use_htf_filter = input.bool(true,  "Use Daily Trend Filter",  group=grp_filter, tooltip="Suppresses longs in daily downtrend and shorts in daily uptrend")
+cooldown      = input.int(6,    "Min Bars Between Signals", group=grp_filter, minval=1, maxval=30)
+min_atr_dist  = input.float(3.0, "Min ATR Distance Between Signals", group=grp_filter, step=0.5)
+
+grp_disp = "── DISPLAY ──"
+show_pivots   = input.bool(true,  "Show Pivot Markers",      group=grp_disp)
+show_div_mark = input.bool(true,  "Show Divergence Markers", group=grp_disp)
+show_stops    = input.bool(true,  "Show Stop/TP Lines",      group=grp_disp)
+show_table    = input.bool(true,  "Show Status Table",       group=grp_disp)
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+atr_val  = ta.atr(atr_len)
+rsi_val  = ta.rsi(close, rsi_len)
+vol_ma   = ta.sma(volume, vol_len)
+
+// Stoch RSI
+rsi_for_stoch = ta.rsi(close, stoch_len)
+stoch_raw     = ta.stoch(rsi_for_stoch, rsi_for_stoch, rsi_for_stoch, stoch_len)
+k_val         = ta.sma(stoch_raw, stoch_k)
+d_val         = ta.sma(k_val, stoch_d)
+
+// ── PIVOTS ────────────────────────────────────────────────────────────────────
+// Primary pivots
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow(low,  pivot_len, pivot_len)
+
+// Track last confirmed pivot values
+var float last_ph_val = na
+var float last_pl_val = na
+var float last_ph_rsi = na
+var float last_pl_rsi = na
+var float last_ph_k   = na
+var float last_pl_k   = na
+
+if not na(ph)
+    last_ph_val := ph
+    last_ph_rsi := rsi_val[pivot_len]
+    last_ph_k   := k_val[pivot_len]
+
+if not na(pl)
+    last_pl_val := pl
+    last_pl_rsi := rsi_val[pivot_len]
+    last_pl_k   := k_val[pivot_len]
+
+// ── DIVERGENCE ────────────────────────────────────────────────────────────────
+price_hh = ta.highest(close, div_lb)
+price_ll  = ta.lowest(close,  div_lb)
+rsi_hh    = ta.highest(rsi_val, div_lb)
+rsi_ll    = ta.lowest(rsi_val,  div_lb)
+
+bull_div = use_div and not na(pl) and close <= price_ll and rsi_val > rsi_ll and rsi_val < 45
+bear_div = use_div and not na(ph) and close >= price_hh and rsi_val < rsi_hh and rsi_val > 55
+
+// ── DAILY TREND FILTER ────────────────────────────────────────────────────────
+d_ema21  = request.security(syminfo.tickerid, "D", ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+d_ema50  = request.security(syminfo.tickerid, "D", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+d_close  = request.security(syminfo.tickerid, "D", close,             lookahead=barmerge.lookahead_off)
+d_bull   = not na(d_ema21) and d_close > d_ema21
+d_bear   = not na(d_ema21) and d_close < d_ema21
+
+// ── PRICE LOCATION FILTER ────────────────────────────────────────────────────
+// BUY only valid when price is in lower half of recent range (not at highs)
+// SELL only valid when price is in upper half of recent range (not at lows)
+range_lookback  = 50
+range_high_50   = ta.highest(close, range_lookback)
+range_low_50    = ta.lowest(close,  range_lookback)
+range_mid_50    = (range_high_50 + range_low_50) / 2.0
+range_75        = range_low_50  + (range_high_50 - range_low_50) * 0.75
+range_25        = range_low_50  + (range_high_50 - range_low_50) * 0.25
+
+// BUY: price must be in lower 65% of 50-bar range (not buying at highs)
+price_ok_for_buy  = close < range_75
+// SELL: price must be in upper 65% of 50-bar range (not selling at lows)
+price_ok_for_sell = close > range_25
+
+// Also require price to be pulling back — not first touch of a new extreme
+// BUY: RSI must show some recovery from extreme low
+rsi_recovering_bull = rsi_val > rsi_val[2]
+// SELL: RSI must be rolling over from extreme high
+rsi_rolling_bear    = rsi_val < rsi_val[2]
+
+// ── VOLUME CHECK ──────────────────────────────────────────────────────────────
+vol_ok = not use_vol or volume >= vol_ma * vol_min_mult
+
+// ── STOCH CONDITIONS ─────────────────────────────────────────────────────────
+stoch_buy_ok  = not use_stoch or (k_val < stoch_ob and (k_val[pivot_len] < stoch_os + 15 or ta.crossover(k_val, d_val)))
+stoch_sell_ok = not use_stoch or (k_val > stoch_os and (k_val[pivot_len] > stoch_ob - 15 or ta.crossunder(k_val, d_val)))
+
+// ── CORE SIGNAL CONDITIONS ────────────────────────────────────────────────────
+// BUY: confirmed pivot low + RSI was low + bullish close + volume + stoch
+// + price must be in lower portion of recent range (not buying at ATH)
+pivot_buy_base = not na(pl) and
+     last_pl_rsi < rsi_buy_max and
+     close > open and
+     vol_ok and
+     stoch_buy_ok and
+     price_ok_for_buy and
+     rsi_recovering_bull
+
+// SELL: confirmed pivot high + RSI was high + bearish close + volume + stoch
+// + price must be in upper portion of recent range (not selling at ATL)
+pivot_sell_base = not na(ph) and
+     last_ph_rsi > rsi_sell_min and
+     close < open and
+     vol_ok and
+     stoch_sell_ok and
+     price_ok_for_sell and
+     rsi_rolling_bear
+
+// Divergence boosts conviction but not required
+buy_signal_raw  = pivot_buy_base
+sell_signal_raw = pivot_sell_base
+
+// Daily trend filter — soft suppression not hard block
+// In daily downtrend long score reduced, in uptrend short suppressed
+htf_long_ok  = not use_htf_filter or d_bull or bull_div
+htf_short_ok = not use_htf_filter or d_bear or bear_div
+
+buy_signal  = barstate.isconfirmed and buy_signal_raw  and htf_long_ok
+sell_signal = barstate.isconfirmed and sell_signal_raw and htf_short_ok
+
+// ── COOLDOWN — bars AND price distance ───────────────────────────────────────
+var int   last_buy_bar   = na
+var int   last_sell_bar  = na
+var float last_buy_price = na
+var float last_sell_price = na
+
+buy_far  = na(last_buy_price)  or math.abs(close - last_buy_price)  > atr_val * min_atr_dist
+sell_far = na(last_sell_price) or math.abs(close - last_sell_price) > atr_val * min_atr_dist
+
+buy_clean  = buy_signal  and (na(last_buy_bar)  or bar_index - last_buy_bar  > cooldown) and buy_far
+sell_clean = sell_signal and (na(last_sell_bar) or bar_index - last_sell_bar > cooldown) and sell_far
+
+if buy_clean
+    last_buy_bar   := bar_index
+    last_buy_price := close
+if sell_clean
+    last_sell_bar   := bar_index
+    last_sell_price := close
+
+// ── STOPS AND TARGETS ─────────────────────────────────────────────────────────
+f_fmt(float p) => str.tostring(p, format.mintick)
+
+buy_stop  = math.min(last_pl_val - atr_val * 0.3, close - atr_val * stop_mult)
+sell_stop = math.max(last_ph_val + atr_val * 0.3, close + atr_val * stop_mult)
+
+buy_risk  = math.max(close - buy_stop,  atr_val * 0.5)
+sell_risk = math.max(sell_stop - close, atr_val * 0.5)
+
+buy_tp1  = close + buy_risk  * tp1_mult
+buy_tp2  = close + buy_risk  * tp2_mult
+sell_tp1 = close - sell_risk * tp1_mult
+sell_tp2 = close - sell_risk * tp2_mult
+
+offset = atr_val * lbl_offset
+
+// ── LABELS ────────────────────────────────────────────────────────────────────
+if buy_clean and buy_risk > 0
+    div_tag = bull_div ? " +DIV" : ""
+    txt = "BUY" + div_tag + "\n" + f_fmt(close) + "\nStop: " + f_fmt(buy_stop) + "\nTP1:  " + f_fmt(buy_tp1) + "\nTP2:  " + f_fmt(buy_tp2)
+    label.new(bar_index, low - offset, txt,
+      style=label.style_label_up,
+      color=color.new(#003d1a, 0),
+      textcolor=color.new(#00e676, 0),
+      size=size.small)
+
+if sell_clean and sell_risk > 0
+    div_tag = bear_div ? " +DIV" : ""
+    txt = "SELL" + div_tag + "\n" + f_fmt(close) + "\nStop: " + f_fmt(sell_stop) + "\nTP1:  " + f_fmt(sell_tp1) + "\nTP2:  " + f_fmt(sell_tp2)
+    label.new(bar_index, high + offset, txt,
+      style=label.style_label_down,
+      color=color.new(#1a0008, 0),
+      textcolor=color.new(#ff3d57, 0),
+      size=size.small)
+
+// ── STOP AND TP LINES ─────────────────────────────────────────────────────────
+if show_stops and buy_clean and buy_risk > 0
+    line.new(bar_index, buy_stop, bar_index + 10, buy_stop, color=color.new(#ff3d57, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, buy_tp1,  bar_index + 10, buy_tp1,  color=color.new(#00e676, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, buy_tp2,  bar_index + 10, buy_tp2,  color=color.new(#00e5ff, 0), width=1, style=line.style_dashed)
+
+if show_stops and sell_clean and sell_risk > 0
+    line.new(bar_index, sell_stop, bar_index + 10, sell_stop, color=color.new(#ff3d57, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, sell_tp1,  bar_index + 10, sell_tp1,  color=color.new(#00e676, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, sell_tp2,  bar_index + 10, sell_tp2,  color=color.new(#00e5ff, 0), width=1, style=line.style_dashed)
+
+// ── PIVOT MARKERS ────────────────────────────────────────────────────────────
+plotshape(show_pivots and not na(ph), title="Pivot High", style=shape.triangledown,
+  location=location.abovebar, color=color.new(#ff3d57, 40), size=size.tiny)
+plotshape(show_pivots and not na(pl), title="Pivot Low",  style=shape.triangleup,
+  location=location.belowbar, color=color.new(#00e676, 40), size=size.tiny)
+
+// ── DIVERGENCE MARKERS ───────────────────────────────────────────────────────
+plotshape(show_div_mark and bull_div, title="Bull Divergence",
+  style=shape.circle, location=location.belowbar,
+  color=color.new(#00e5ff, 0), size=size.tiny, text="D", textcolor=color.white)
+plotshape(show_div_mark and bear_div, title="Bear Divergence",
+  style=shape.circle, location=location.abovebar,
+  color=color.new(#ff6d00, 0), size=size.tiny, text="D", textcolor=color.white)
+
+// ── STATUS TABLE ─────────────────────────────────────────────────────────────
+if show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 11, border_width=1, bgcolor=color.new(#070b17, 10))
+
+    d_str = d_bull ? "Daily Bull" : d_bear ? "Daily Bear" : "Neutral"
+    d_col = d_bull ? color.new(#00e676, 0) : d_bear ? color.new(#ff3d57, 0) : color.gray
+
+    table.cell(t, 0, 0, "REV SNIPER",  bgcolor=color.new(#1a2535, 0), text_color=color.new(#00e5ff, 0), text_size=size.normal)
+    table.cell(t, 1, 0, "4H SIGNALS",  bgcolor=color.new(#1a2535, 0), text_color=color.new(#4a6580, 0), text_size=size.normal)
+
+    table.cell(t, 0, 1, "Daily Trend", text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 1, d_str,         text_color=d_col,                 text_size=size.small)
+
+    table.cell(t, 0, 2, "RSI",         text_color=color.new(#4a6580, 0), text_size=size.small)
+    rsi_col = rsi_val < 35 ? color.new(#00e676, 0) : rsi_val > 65 ? color.new(#ff3d57, 0) : color.gray
+    table.cell(t, 1, 2, str.tostring(rsi_val, "#.#"), text_color=rsi_col, text_size=size.small)
+
+    table.cell(t, 0, 3, "Stoch K/D",   text_color=color.new(#4a6580, 0), text_size=size.small)
+    sk_col = k_val < stoch_os ? color.new(#00e676, 0) : k_val > stoch_ob ? color.new(#ff3d57, 0) : color.gray
+    table.cell(t, 1, 3, str.tostring(k_val, "#.#") + " / " + str.tostring(d_val, "#.#"), text_color=sk_col, text_size=size.small)
+
+    table.cell(t, 0, 4, "Volume",       text_color=color.new(#4a6580, 0), text_size=size.small)
+    v_col = volume > vol_ma ? color.new(#00e676, 0) : color.gray
+    table.cell(t, 1, 4, str.tostring(volume / vol_ma, "#.##") + "x avg", text_color=v_col, text_size=size.small)
+
+    table.cell(t, 0, 5, "Bull Div",     text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 5, bull_div ? "ACTIVE" : "none", text_color=bull_div ? color.new(#00e5ff, 0) : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 6, "Bear Div",     text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 6, bear_div ? "ACTIVE" : "none", text_color=bear_div ? color.new(#ff6d00, 0) : color.gray, text_size=size.small)
+
+    table.cell(t, 0, 7, "Pivot High",   text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 7, not na(last_ph_val) ? f_fmt(last_ph_val) : "—", text_color=color.new(#ff3d57, 40), text_size=size.small)
+
+    table.cell(t, 0, 8, "Pivot Low",    text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 8, not na(last_pl_val) ? f_fmt(last_pl_val) : "—", text_color=color.new(#00e676, 40), text_size=size.small)
+
+    table.cell(t, 0, 9, "ATR",          text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 9, f_fmt(atr_val), text_color=color.gray,            text_size=size.small)
+
+    // Extra row for price location context
+    loc_pct = (close - range_low_50) / math.max(range_high_50 - range_low_50, syminfo.mintick) * 100
+    loc_col = loc_pct < 35 ? color.new(#00e676, 0) : loc_pct > 65 ? color.new(#ff3d57, 0) : color.gray
+    table.cell(t, 0, 10, "Range Pos",   text_color=color.new(#4a6580, 0), text_size=size.small)
+    table.cell(t, 1, 10, str.tostring(loc_pct, "#") + "% of 50-bar range", text_color=loc_col, text_size=size.small)
+
+// ── ALERTS ────────────────────────────────────────────────────────────────────
+alertcondition(buy_clean,  "Reversal Sniper BUY",  "REVERSAL SNIPER BUY on {{ticker}} at {{close}}")
+alertcondition(sell_clean, "Reversal Sniper SELL", "REVERSAL SNIPER SELL on {{ticker}} at {{close}}")
+alertcondition(buy_clean  and bull_div, "Reversal Sniper BUY + Divergence",  "HIGH CONVICTION BUY with divergence on {{ticker}}")
+alertcondition(sell_clean and bear_div, "Reversal Sniper SELL + Divergence", "HIGH CONVICTION SELL with divergence on {{ticker}}")

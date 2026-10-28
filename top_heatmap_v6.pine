@@ -1,0 +1,64 @@
+//@version=6
+indicator("Top Heatmap", shorttitle="TOP HEATMAP", overlay=true)
+
+src       = input.source(close, "Source")
+fast_len  = input.int(300, "Fast EMA Length")
+slow_len  = input.int(400, "Slow EMA Length")
+transp    = input.int(60,  "Band Transparency", minval=0, maxval=100)
+b1_min    = input.float(100, "Band 1 Min % Green",  step=10)
+b1_max    = input.float(200, "Band 1 Max % Green",  step=10)
+b2_min    = input.float(200, "Band 2 Min % Yellow", step=10)
+b2_max    = input.float(300, "Band 2 Max % Yellow", step=10)
+b3_min    = input.float(300, "Band 3 Min % Orange", step=10)
+b3_max    = input.float(400, "Band 3 Max % Orange", step=10)
+b4_min    = input.float(400, "Band 4 Min % Red",    step=10)
+show_ema  = input.bool(true, "Show EMA Lines")
+show_lbl  = input.bool(true, "Show Zone Label")
+
+fast_ema  = ta.ema(src, fast_len)
+slow_ema  = ta.ema(src, slow_len)
+ema_base  = math.max(fast_ema, slow_ema)
+pct       = not na(ema_base) and ema_base > 0 ? (src - ema_base) / ema_base * 100 : 0.0
+
+l1lo = not na(ema_base) ? ema_base * (1 + b1_min / 100) : na
+l1hi = not na(ema_base) ? ema_base * (1 + b1_max / 100) : na
+l2lo = not na(ema_base) ? ema_base * (1 + b2_min / 100) : na
+l2hi = not na(ema_base) ? ema_base * (1 + b2_max / 100) : na
+l3lo = not na(ema_base) ? ema_base * (1 + b3_min / 100) : na
+l3hi = not na(ema_base) ? ema_base * (1 + b3_max / 100) : na
+l4lo = not na(ema_base) ? ema_base * (1 + b4_min / 100) : na
+l4hi = not na(ema_base) ? ema_base * (1 + (b4_min + 200) / 100) : na
+
+plot(show_ema ? fast_ema : na, "Fast EMA", color=color.new(#00e5ff, 20), linewidth=1)
+plot(show_ema ? slow_ema : na, "Slow EMA", color=color.new(#9c27b0, 20), linewidth=1)
+
+p1lo = plot(l1lo, "B1 Lo", color=color.new(color.green,  100), display=display.none)
+p1hi = plot(l1hi, "B1 Hi", color=color.new(color.green,  100), display=display.none)
+p2lo = plot(l2lo, "B2 Lo", color=color.new(color.yellow, 100), display=display.none)
+p2hi = plot(l2hi, "B2 Hi", color=color.new(color.yellow, 100), display=display.none)
+p3lo = plot(l3lo, "B3 Lo", color=color.new(color.orange, 100), display=display.none)
+p3hi = plot(l3hi, "B3 Hi", color=color.new(color.orange, 100), display=display.none)
+p4lo = plot(l4lo, "B4 Lo", color=color.new(color.red,    100), display=display.none)
+p4hi = plot(l4hi, "B4 Hi", color=color.new(color.red,    100), display=display.none)
+
+fill(p1lo, p1hi, color=color.new(#00e676, transp), title="Green Zone")
+fill(p2lo, p2hi, color=color.new(#ffd600, transp), title="Yellow Zone")
+fill(p3lo, p3hi, color=color.new(#ff6d00, transp), title="Orange Zone")
+fill(p4lo, p4hi, color=color.new(#ff1744, transp), title="Red Zone")
+
+in1 = pct >= b1_min and pct < b1_max
+in2 = pct >= b2_min and pct < b2_max
+in3 = pct >= b3_min and pct < b3_max
+in4 = pct >= b4_min
+
+// Background color removed — caused chart scroll issues
+
+if show_lbl and barstate.islast and not na(ema_base)
+    z = in4 ? "EXTREME TOP" : in3 ? "DANGER - Take Profits" : in2 ? "CAUTION - Reduce Exposure" : in1 ? "ELEVATED - Watch Closely" : "NEUTRAL - Below Top Zones"
+    c = in4 ? color.new(#ff1744,0) : in3 ? color.new(#ff6d00,0) : in2 ? color.new(#ffd600,0) : in1 ? color.new(#00e676,0) : color.new(#8ba5c8,0)
+    label.new(bar_index, high * 1.01, z + "\n" + str.tostring(pct,"#.#") + "% above EMA", style=label.style_label_left, color=color.new(#070b17,10), textcolor=c, size=size.small)
+
+alertcondition(in1 and not in1[1], "Green Zone",  "TOP HEATMAP: Elevated on {{ticker}}")
+alertcondition(in2 and not in2[1], "Yellow Zone", "TOP HEATMAP: Caution on {{ticker}}")
+alertcondition(in3 and not in3[1], "Orange Zone", "TOP HEATMAP: Danger on {{ticker}}")
+alertcondition(in4 and not in4[1], "Red Zone",    "TOP HEATMAP: EXTREME TOP on {{ticker}}")
